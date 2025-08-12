@@ -2,7 +2,7 @@ import { useState, useEffect } from "react";
 import { SidebarInset } from "@/components/ui/sidebar";
 import { DashboardHeader } from "../components/header";
 import { Button } from "@/components/ui/button";
-import { RefreshCw } from "lucide-react";
+import { RefreshCw, TrendingUp } from "lucide-react";
 import HoldingsTable from "../components/dashboard/HoldingsTable";
 import { mockData } from "../api";
 
@@ -47,6 +47,25 @@ export default function HoldingsPage() {
     } catch (error) {
       console.error("Error refreshing holdings:", error);
       setError("Failed to refresh holdings data");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleUpdatePrices = async () => {
+    try {
+      setLoading(true);
+      // For development, use mock data
+      const data = mockData.holdings;
+      setHoldings(data);
+
+      // Uncomment when backend is ready:
+      // await portfolioAPI.updateMarketPrices();
+      // const data = await portfolioAPI.getHoldings();
+      // setHoldings(data);
+    } catch (error) {
+      console.error("Error updating market prices:", error);
+      setError("Failed to update market prices");
     } finally {
       setLoading(false);
     }
@@ -99,10 +118,16 @@ export default function HoldingsPage() {
               Individual stock positions with performance metrics
             </p>
           </div>
-          <Button onClick={handleRefresh} variant="outline">
-            <RefreshCw className="h-4 w-4 mr-2" />
-            Refresh
-          </Button>
+          <div className="flex gap-2">
+            <Button onClick={handleUpdatePrices} variant="outline">
+              <TrendingUp className="h-4 w-4 mr-2" />
+              Update Prices
+            </Button>
+            <Button onClick={handleRefresh} variant="outline">
+              <RefreshCw className="h-4 w-4 mr-2" />
+              Refresh
+            </Button>
+          </div>
         </div>
 
         {/* Holdings Table */}

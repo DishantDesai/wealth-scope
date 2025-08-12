@@ -1,8 +1,7 @@
 import axios from "axios";
 
 // Base URL for Firebase Functions (you'll need to replace this with your actual Firebase Functions URL)
-const API_BASE_URL = "https://us-central1-your-project-id.cloudfunctions.net";
-
+const API_BASE_URL = "https://us-central1-wealth-scope.cloudfunctions.net";
 // Create axios instance with default config
 const api = axios.create({
   baseURL: API_BASE_URL,
@@ -98,6 +97,17 @@ export const portfolioAPI = {
       return response.data;
     } catch (error) {
       console.error("Error recalculating holdings:", error);
+      throw error;
+    }
+  },
+
+  // Update market prices
+  updateMarketPrices: async () => {
+    try {
+      const response = await api.post("/updateMarketPrices");
+      return response.data;
+    } catch (error) {
+      console.error("Error updating market prices:", error);
       throw error;
     }
   },

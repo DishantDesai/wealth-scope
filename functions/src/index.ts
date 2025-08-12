@@ -10,8 +10,18 @@
 import { setGlobalOptions } from "firebase-functions";
 import * as functions from "firebase-functions";
 import * as admin from "firebase-admin";
+
+admin.initializeApp();
+
 import { Request, Response } from "express";
-import { parseCurrencyAmount, getUSDtoCADRate } from "./utils";
+import cors from "cors";
+
+import {
+  parseCurrencyAmount,
+  getUSDtoCADRate,
+  getMultipleStockPrices,
+  convertCurrencyToCAD,
+} from "./utils";
 import {
   calculatePortfolioSummary,
   getPortfolioSummary,
@@ -21,15 +31,17 @@ import {
   calculateHoldings,
   saveHoldings,
 } from "./firestore";
-admin.initializeApp();
+
+const corsHandler = cors({ origin: true }); // You can restrict to your domain if you want
 
 exports.transactionWebhook = functions.https.onRequest(
   async (req: Request, res: Response) => {
     try {
       functions.logger.info(
-        "INFO: Transaction webhook triggered with body:",
+        "🔄 Transaction webhook triggered with body:",
         req.body
       );
+
       const {
         symbol,
         account,
@@ -41,13 +53,11 @@ exports.transactionWebhook = functions.https.onRequest(
         time,
       } = req.body;
 
-      functions.logger.info("before parsing", total_value, total_cost);
-
       const currency =
         total_value?.includes("US$") || total_cost?.includes("US$")
           ? "USD"
           : "CAD";
-      functions.logger.info(currency);
+
       const parsed = {
         shares: parseFloat(shares),
         average_price: parseFloat(average_price?.replace(/[^\d.-]/g, "") || ""),
@@ -76,14 +86,19 @@ exports.transactionWebhook = functions.https.onRequest(
         }),
       };
 
+      functions.logger.info("📝 Final transaction data:", transactionData);
+
       await admin.firestore().collection("transactions").add(transactionData);
+      functions.logger.info("✅ Transaction saved to Firestore");
 
       // Recalculate holdings and portfolio summary after new transaction
+      functions.logger.info("🔄 Starting portfolio recalculation...");
       await recalculatePortfolioSummaryAndHoldings();
+      functions.logger.info("✅ Portfolio recalculation completed");
 
       res.status(200).send("Email processed successfully");
     } catch (err) {
-      functions.logger.error("ERROR: Transaction Webhook Error:", err);
+      functions.logger.error("❌ Transaction Webhook Error:", err);
       res.status(500).send("Error: " + err);
     }
   }
@@ -93,11 +108,18 @@ exports.dividendWebhook = functions.https.onRequest(
   async (req: Request, res: Response) => {
     try {
       functions.logger.info(
-        "INFO: Dividend webhook triggered with body:",
+        "🔄 Dividend webhook triggered with body:",
         req.body
       );
+
       const { symbol, account, amount } = req.body;
       const currency = amount.includes("US$") ? "USD" : "CAD";
+
+      functions.logger.info("💱 Dividend currency detection:", {
+        amount,
+        currency,
+      });
+
       const dividendData = {
         symbol,
         account,
@@ -105,14 +127,21 @@ exports.dividendWebhook = functions.https.onRequest(
         amount: parseFloat(amount.replace(/[^\d.]/g, "")),
         payment_date: admin.firestore.Timestamp.fromDate(new Date()),
       };
+
+      functions.logger.info("📝 Dividend data to save:", dividendData);
       await admin.firestore().collection("dividends").add(dividendData);
+      functions.logger.info("✅ Dividend saved to Firestore");
 
       // Recalculate portfolio summary after new dividend
+      functions.logger.info(
+        "🔄 Starting portfolio recalculation after dividend..."
+      );
       await recalculatePortfolioSummaryAndHoldings();
+      functions.logger.info("✅ Portfolio recalculation completed");
 
       res.status(200).send("Email processed successfully");
     } catch (err: any) {
-      functions.logger.error("ERROR: Dividend Webhook Error:", err);
+      functions.logger.error("❌ Dividend Webhook Error:", err);
       res.status(500).send("Error: " + err);
     }
   }
@@ -121,16 +150,25 @@ exports.dividendWebhook = functions.https.onRequest(
 exports.getPortfolioSummary = functions.https.onRequest(
   async (req: Request, res: Response) => {
     try {
+      functions.logger.info("📊 Portfolio summary API request received");
+
       const summary = await getPortfolioSummary();
       if (summary) {
+        functions.logger.info("✅ Returning existing portfolio summary");
         res.status(200).json(summary);
       } else {
         // If no summary exists, calculate one
+        functions.logger.info(
+          "🔄 No existing summary found, calculating new one..."
+        );
         const newSummary = await calculatePortfolioSummary();
+        functions.logger.info(
+          "✅ New portfolio summary calculated and returned"
+        );
         res.status(200).json(newSummary);
       }
     } catch (err) {
-      functions.logger.error("ERROR: Get Portfolio Summary Error:", err);
+      functions.logger.error("❌ Get Portfolio Summary Error:", err);
       res.status(500).send("Error: " + err);
     }
   }
@@ -139,27 +177,34 @@ exports.getPortfolioSummary = functions.https.onRequest(
 // API endpoint to get transactions
 exports.getTransactions = functions.https.onRequest(
   async (req: Request, res: Response) => {
-    try {
-      const transactionsSnapshot = await admin
-        .firestore()
-        .collection("transactions")
-        .orderBy("transaction_date", "desc")
-        .limit(50)
-        .get();
+    corsHandler(req, res, async () => {
+      try {
+        functions.logger.info("📊 Get transactions API request received");
 
-      const transactions: any[] = [];
-      transactionsSnapshot.forEach((doc) => {
-        transactions.push({
-          id: doc.id,
-          ...doc.data(),
+        const transactionsSnapshot = await admin
+          .firestore()
+          .collection("transactions")
+          .orderBy("transaction_date", "desc")
+          .limit(50)
+          .get();
+
+        const transactions: any[] = [];
+        transactionsSnapshot.forEach((doc) => {
+          transactions.push({
+            id: doc.id,
+            ...doc.data(),
+          });
         });
-      });
 
-      res.status(200).json(transactions);
-    } catch (err) {
-      functions.logger.error("ERROR: Get Transactions Error:", err);
-      res.status(500).send("Error: " + err);
-    }
+        functions.logger.info(
+          `✅ Returning ${transactions.length} transactions`
+        );
+        res.status(200).json(transactions);
+      } catch (err) {
+        functions.logger.error("❌ Get Transactions Error:", err);
+        res.status(500).send("Error: " + err);
+      }
+    });
   }
 );
 
@@ -167,6 +212,8 @@ exports.getTransactions = functions.https.onRequest(
 exports.getDividends = functions.https.onRequest(
   async (req: Request, res: Response) => {
     try {
+      functions.logger.info("📊 Get dividends API request received");
+
       const dividendsSnapshot = await admin
         .firestore()
         .collection("dividends")
@@ -182,9 +229,10 @@ exports.getDividends = functions.https.onRequest(
         });
       });
 
+      functions.logger.info(`✅ Returning ${dividends.length} dividends`);
       res.status(200).json(dividends);
     } catch (err) {
-      functions.logger.error("ERROR: Get Dividends Error:", err);
+      functions.logger.error("❌ Get Dividends Error:", err);
       res.status(500).send("Error: " + err);
     }
   }
@@ -194,10 +242,14 @@ exports.getDividends = functions.https.onRequest(
 exports.recalculateSummary = functions.https.onRequest(
   async (req: Request, res: Response) => {
     try {
+      functions.logger.info(
+        "🔄 Manual portfolio recalculation request received"
+      );
       await recalculatePortfolioSummaryAndHoldings();
+      functions.logger.info("✅ Manual portfolio recalculation completed");
       res.status(200).send("Portfolio summary recalculated successfully");
     } catch (err) {
-      functions.logger.error("ERROR: Recalculate Summary Error:", err);
+      functions.logger.error("❌ Recalculate Summary Error:", err);
       res.status(500).send("Error: " + err);
     }
   }
@@ -256,6 +308,60 @@ exports.recalculateHoldings = functions.https.onRequest(
       res.status(200).send("Holdings recalculated successfully");
     } catch (err) {
       functions.logger.error("ERROR: Recalculate Holdings Error:", err);
+      res.status(500).send("Error: " + err);
+    }
+  }
+);
+
+// API endpoint to update market prices
+exports.updateMarketPrices = functions.https.onRequest(
+  async (req: Request, res: Response) => {
+    try {
+      // Get all holdings to update their prices
+      const holdings = await getHoldings();
+      const symbols = holdings.map((holding) => holding.symbol);
+
+      if (symbols.length === 0) {
+        res.status(200).send("No holdings to update");
+        return;
+      }
+
+      // Get current market prices
+      const marketPrices = await getMultipleStockPrices(symbols);
+
+      // Get exchange rate once
+      const exchangeRate = await getUSDtoCADRate();
+
+      // Update holdings with new prices
+      const batch = admin.firestore().batch();
+      holdings.forEach((holding) => {
+        const currentPrice = marketPrices.get(holding.symbol);
+        if (currentPrice && currentPrice > 0) {
+          const currentPriceCAD = convertCurrencyToCAD(
+            currentPrice,
+            holding.currency,
+            exchangeRate
+          );
+          const marketValueCAD = holding.quantity * currentPriceCAD;
+
+          const docRef = admin
+            .firestore()
+            .collection("holdings")
+            .doc(holding.symbol);
+          batch.update(docRef, {
+            currentPrice,
+            currentPriceCAD,
+            marketValue: holding.quantity * currentPrice,
+            marketValueCAD,
+            lastUpdated: admin.firestore.Timestamp.now(),
+          });
+        }
+      });
+
+      await batch.commit();
+      res.status(200).send(`Updated prices for ${symbols.length} symbols`);
+    } catch (err) {
+      functions.logger.error("ERROR: Update Market Prices Error:", err);
       res.status(500).send("Error: " + err);
     }
   }

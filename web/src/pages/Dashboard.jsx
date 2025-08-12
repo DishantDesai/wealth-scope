@@ -5,11 +5,11 @@ import PortfolioSummary from "../components/dashboard/PortfolioSummary";
 import PortfolioChart from "../components/dashboard/PortfolioChart";
 import RecentTransactions from "../components/dashboard/RecentTransactions";
 import ExchangeRateDisplay from "../components/dashboard/ExchangeRateDisplay";
-import { mockData } from "../api";
+import { portfolioAPI } from "../api";
 
 export default function DashboardPage() {
   const [portfolioData, setPortfolioData] = useState(null);
-  const [transactions, setTransactions] = useState([]);
+  // const [transactions, setTransactions] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
@@ -18,21 +18,9 @@ export default function DashboardPage() {
       try {
         setLoading(true);
 
-        // For development, use mock data
-        // TODO: Replace with actual API calls when backend is ready
-        const summaryData = mockData.portfolioSummary;
-        const transactionsData = mockData.transactions;
-
+        const [summaryData] = await portfolioAPI.getPortfolioSummary();
+        console.log(summaryData);
         setPortfolioData(summaryData);
-        setTransactions(transactionsData);
-
-        // Uncomment when backend is ready:
-        // const [summaryData, transactionsData] = await Promise.all([
-        //   portfolioAPI.getPortfolioSummary(),
-        //   portfolioAPI.getTransactions()
-        // ]);
-        // setPortfolioData(summaryData);
-        // setTransactions(transactionsData);
       } catch (err) {
         console.error("Error fetching dashboard data:", err);
         setError("Failed to load dashboard data");
@@ -119,7 +107,7 @@ export default function DashboardPage() {
         </div>
 
         {/* Recent Transactions */}
-        <RecentTransactions transactions={transactions} />
+        {/* <RecentTransactions transactions={transactions} /> */}
       </div>
     </SidebarInset>
   );

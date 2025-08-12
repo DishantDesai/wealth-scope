@@ -1,6 +1,10 @@
 import * as admin from "firebase-admin";
 import * as functions from "firebase-functions";
-import { getUSDtoCADRate, convertCurrencyToCAD } from "./utils";
+import {
+  getUSDtoCADRate,
+  convertCurrencyToCAD,
+  getMultipleStockPrices,
+} from "./utils";
 
 const db = admin.firestore();
 
@@ -51,89 +55,16 @@ export interface Holding {
 
 export async function calculatePortfolioSummary(): Promise<PortfolioSummary> {
   try {
-    // Get current exchange rate
-    const exchangeRate = await getUSDtoCADRate();
-    functions.logger.info(`Using USD to CAD exchange rate: ${exchangeRate}`);
-
-    // Get all transactions
-    const transactionsSnapshot = await db.collection("transactions").get();
-    const transactions: Transaction[] = [];
-
-    transactionsSnapshot.forEach((doc) => {
-      transactions.push(doc.data() as Transaction);
-    });
-
-    // Calculate total invested (sum of all buy transactions minus sells) - all converted to CAD
-    let totalInvested = 0;
-    transactions.forEach((transaction) => {
-      const transactionAmount =
-        transaction.total_cost ||
-        transaction.shares * transaction.average_price;
-
-      // Convert to CAD
-      const amountInCAD = convertCurrencyToCAD(
-        transactionAmount,
-        transaction.currency,
-        exchangeRate
-      );
-
-      if (transaction.type === "Buy") {
-        totalInvested += amountInCAD;
-      } else if (transaction.type === "Sell") {
-        totalInvested -= amountInCAD;
-      }
-    });
-
-    // Get dividends for current year - all converted to CAD
-    const currentYear = new Date().getFullYear();
-    const startOfYear = new Date(currentYear, 0, 1);
-    const endOfYear = new Date(currentYear, 11, 31, 23, 59, 59);
-
-    const dividendsSnapshot = await db
-      .collection("dividends")
-      .where(
-        "payment_date",
-        ">=",
-        admin.firestore.Timestamp.fromDate(startOfYear)
-      )
-      .where(
-        "payment_date",
-        "<=",
-        admin.firestore.Timestamp.fromDate(endOfYear)
-      )
-      .get();
-
-    let totalDividendsYTD = 0;
-    dividendsSnapshot.forEach((doc) => {
-      const dividend = doc.data() as Dividend;
-      // Convert dividend to CAD
-      const dividendInCAD = convertCurrencyToCAD(
-        dividend.amount,
-        dividend.currency,
-        exchangeRate
-      );
-      totalDividendsYTD += dividendInCAD;
-    });
-
-    // For now, we'll use a placeholder portfolio value
-    // TODO: Integrate with real-time price API (Yahoo Finance, Alpha Vantage, etc.)
-    const portfolioValue = totalInvested; // Placeholder - should be calculated from current holdings × latest prices
-
-    const gainLoss = portfolioValue + totalDividendsYTD - totalInvested;
-
-    const summary: PortfolioSummary = {
-      totalInvested,
-      totalDividendsYTD,
-      portfolioValue,
-      gainLoss,
-      lastUpdated: admin.firestore.Timestamp.now(),
-      currency: "CAD", // All values are now in CAD
-    };
+    // Use the combined function to avoid redundancy
+    const { portfolioSummary } = await calculateHoldingsAndPortfolioSummary();
 
     // Store the summary in Firestore
-    await db.collection("portfolio_summary").doc("current").set(summary);
+    await db
+      .collection("portfolio_summary")
+      .doc("current")
+      .set(portfolioSummary);
 
-    return summary;
+    return portfolioSummary;
   } catch (error) {
     functions.logger.error("Error calculating portfolio summary:", error);
     throw error;
@@ -156,12 +87,19 @@ export async function getPortfolioSummary(): Promise<PortfolioSummary | null> {
 // Function to recalculate summary when transactions or dividends are added
 export async function recalculatePortfolioSummaryAndHoldings() {
   try {
-    // Recalculate holdings first
-    const holdings = await calculateHoldings();
+    // Calculate holdings and portfolio summary in one pass
+    const { holdings, portfolioSummary } =
+      await calculateHoldingsAndPortfolioSummary();
+
+    // Save holdings
     await saveHoldings(holdings);
 
-    // Then recalculate portfolio summary
-    await calculatePortfolioSummary();
+    // Save portfolio summary
+    await db
+      .collection("portfolio_summary")
+      .doc("current")
+      .set(portfolioSummary);
+
     functions.logger.info(
       "Portfolio summary and holdings recalculated successfully"
     );
@@ -171,15 +109,21 @@ export async function recalculatePortfolioSummaryAndHoldings() {
   }
 }
 
-// Calculate holdings from all historical transactions
-export async function calculateHoldings(): Promise<Holding[]> {
+// Combined function to calculate both holdings and portfolio summary in one pass
+export async function calculateHoldingsAndPortfolioSummary(): Promise<{
+  holdings: Holding[];
+  portfolioSummary: PortfolioSummary;
+}> {
   try {
+    functions.logger.info("🚀 Starting calculateHoldingsAndPortfolioSummary");
+
     const exchangeRate = await getUSDtoCADRate();
     functions.logger.info(
-      `Calculating holdings with USD to CAD rate: ${exchangeRate}`
+      `💱 Exchange rate fetched: USD to CAD = ${exchangeRate}`
     );
 
     // Get all transactions ordered by date
+    functions.logger.info("📊 Fetching transactions from Firestore...");
     const transactionsSnapshot = await db
       .collection("transactions")
       .orderBy("transaction_date", "asc")
@@ -190,10 +134,16 @@ export async function calculateHoldings(): Promise<Holding[]> {
       transactions.push(doc.data() as Transaction);
     });
 
+    functions.logger.info(
+      `📈 Found ${transactions.length} transactions to process`
+    );
+
     // Group transactions by symbol and calculate holdings
     const holdingsMap = new Map<string, any>();
+    let buyCount = 0;
+    let sellCount = 0;
 
-    transactions.forEach((transaction) => {
+    transactions.forEach((transaction, index) => {
       const { symbol, type, shares, average_price, total_cost, currency } =
         transaction;
 
@@ -205,6 +155,9 @@ export async function calculateHoldings(): Promise<Holding[]> {
           totalCostCAD: 0,
           currency: currency || "CAD",
         });
+        functions.logger.info(
+          `🆕 New symbol found: ${symbol} (currency: ${currency || "CAD"})`
+        );
       }
 
       const holding = holdingsMap.get(symbol);
@@ -215,7 +168,21 @@ export async function calculateHoldings(): Promise<Holding[]> {
         exchangeRate
       );
 
+      functions.logger.info(`💼 Processing transaction ${index + 1}:`, {
+        symbol,
+        type,
+        shares,
+        average_price,
+        total_cost,
+        currency,
+        transactionAmount,
+        transactionAmountCAD,
+        currentQuantity: holding.quantity,
+        currentTotalCost: holding.totalCost,
+      });
+
       if (type === "Buy") {
+        buyCount++;
         // Calculate new average price
         const newTotalCost = holding.totalCost + transactionAmount;
         const newTotalCostCAD = holding.totalCostCAD + transactionAmountCAD;
@@ -226,9 +193,25 @@ export async function calculateHoldings(): Promise<Holding[]> {
         holding.totalCostCAD = newTotalCostCAD;
         holding.avgBuyPrice = newTotalCost / newQuantity;
         holding.avgBuyPriceCAD = newTotalCostCAD / newQuantity;
+
+        functions.logger.info(`📈 Buy processed for ${symbol}:`, {
+          newQuantity,
+          newTotalCost,
+          newTotalCostCAD,
+          avgBuyPrice: holding.avgBuyPrice,
+          avgBuyPriceCAD: holding.avgBuyPriceCAD,
+        });
       } else if (type === "Sell") {
+        sellCount++;
         // Reduce quantity but keep average price (FIFO method)
+        const oldQuantity = holding.quantity;
         holding.quantity = Math.max(0, holding.quantity - shares);
+
+        functions.logger.info(`📉 Sell processed for ${symbol}:`, {
+          oldQuantity,
+          sharesSold: shares,
+          newQuantity: holding.quantity,
+        });
 
         if (holding.quantity === 0) {
           // If all shares sold, reset the holding
@@ -236,25 +219,131 @@ export async function calculateHoldings(): Promise<Holding[]> {
           holding.totalCostCAD = 0;
           holding.avgBuyPrice = 0;
           holding.avgBuyPriceCAD = 0;
+          functions.logger.info(
+            `🗑️ All shares sold for ${symbol}, holding reset`
+          );
         } else {
           // Adjust total cost proportionally
-          const sellRatio = shares / (holding.quantity + shares);
+          const sellRatio = shares / oldQuantity;
           const costReduction = holding.totalCost * sellRatio;
           const costReductionCAD = holding.totalCostCAD * sellRatio;
 
           holding.totalCost -= costReduction;
           holding.totalCostCAD -= costReductionCAD;
+
+          functions.logger.info(`💰 Cost adjusted for ${symbol}:`, {
+            sellRatio,
+            costReduction,
+            costReductionCAD,
+            newTotalCost: holding.totalCost,
+            newTotalCostCAD: holding.totalCostCAD,
+          });
         }
       }
     });
 
+    functions.logger.info(
+      `📊 Transaction summary: ${buyCount} buys, ${sellCount} sells`
+    );
+
+    // Calculate total invested from transactions
+    let totalInvested = 0;
+    transactions.forEach((transaction) => {
+      const transactionAmount =
+        transaction.total_cost ||
+        transaction.shares * transaction.average_price;
+
+      // Convert to CAD
+      const amountInCAD = convertCurrencyToCAD(
+        transactionAmount,
+        transaction.currency,
+        exchangeRate
+      );
+
+      if (transaction.type === "Buy") {
+        totalInvested += amountInCAD;
+      } else if (transaction.type === "Sell") {
+        totalInvested -= amountInCAD;
+      }
+    });
+
+    functions.logger.info(`💰 Total invested (CAD): ${totalInvested}`);
+
+    // Get dividends for current year - all converted to CAD
+    const currentYear = new Date().getFullYear();
+    const startOfYear = new Date(currentYear, 0, 1);
+    const endOfYear = new Date(currentYear, 11, 31, 23, 59, 59);
+
+    functions.logger.info(`📅 Fetching dividends for year ${currentYear}...`);
+    const dividendsSnapshot = await db
+      .collection("dividends")
+      .where(
+        "payment_date",
+        ">=",
+        admin.firestore.Timestamp.fromDate(startOfYear)
+      )
+      .where(
+        "payment_date",
+        "<=",
+        admin.firestore.Timestamp.fromDate(endOfYear)
+      )
+      .get();
+
+    let totalDividendsYTD = 0;
+    const dividends: Dividend[] = [];
+    dividendsSnapshot.forEach((doc) => {
+      const dividend = doc.data() as Dividend;
+      dividends.push(dividend);
+      // Convert dividend to CAD
+      const dividendInCAD = convertCurrencyToCAD(
+        dividend.amount,
+        dividend.currency,
+        exchangeRate
+      );
+      totalDividendsYTD += dividendInCAD;
+    });
+
+    // Get current market prices for all symbols
+    const symbols = Array.from(holdingsMap.keys());
+    functions.logger.info(
+      `📈 Fetching market prices for ${symbols.length} symbols:`,
+      symbols
+    );
+
+    const marketPrices = await getMultipleStockPrices(symbols);
+    functions.logger.info(`💹 Market prices fetched:`, {
+      symbolsWithPrices: Array.from(marketPrices.entries()),
+      totalSymbols: symbols.length,
+      symbolsWithPricesCount: marketPrices.size,
+    });
+
     // Convert to Holding objects and filter out zero quantity holdings
     const holdings: Holding[] = [];
+    let portfolioValue = 0;
+
+    functions.logger.info(
+      `🏢 Processing ${holdingsMap.size} potential holdings...`
+    );
+
     for (const [symbol, holding] of holdingsMap) {
       if (holding.quantity > 0) {
-        // For now, use average price as current price (will be updated by market data)
-        const currentPrice = holding.avgBuyPrice;
-        const currentPriceCAD = holding.avgBuyPriceCAD;
+        // Get current market price
+        const currentPrice = marketPrices.get(symbol) || holding.avgBuyPrice;
+
+        functions.logger.info(`📊 Processing holding for ${symbol}:`, {
+          quantity: holding.quantity,
+          avgBuyPrice: holding.avgBuyPrice,
+          avgBuyPriceCAD: holding.avgBuyPriceCAD,
+          currentPrice,
+          currency: holding.currency,
+          hasMarketPrice: marketPrices.has(symbol),
+        });
+
+        const currentPriceCAD = convertCurrencyToCAD(
+          currentPrice,
+          holding.currency,
+          exchangeRate
+        );
         const marketValue = holding.quantity * currentPrice;
         const marketValueCAD = holding.quantity * currentPriceCAD;
         const unrealizedGainLoss = marketValue - holding.totalCost;
@@ -264,7 +353,7 @@ export async function calculateHoldings(): Promise<Holding[]> {
             ? (unrealizedGainLoss / holding.totalCost) * 100
             : 0;
 
-        holdings.push({
+        const holdingObj = {
           symbol,
           quantity: holding.quantity,
           avgBuyPrice: holding.avgBuyPrice,
@@ -280,10 +369,64 @@ export async function calculateHoldings(): Promise<Holding[]> {
           unrealizedGainLossPercentage,
           currency: holding.currency,
           lastUpdated: admin.firestore.Timestamp.now(),
+        };
+
+        holdings.push(holdingObj);
+
+        // Add to portfolio value
+        portfolioValue += marketValueCAD;
+
+        functions.logger.info(`✅ Holding calculated for ${symbol}:`, {
+          marketValue,
+          marketValueCAD,
+          unrealizedGainLoss,
+          unrealizedGainLossCAD,
+          unrealizedGainLossPercentage: `${unrealizedGainLossPercentage.toFixed(
+            2
+          )}%`,
         });
+      } else {
+        functions.logger.info(`❌ Skipping ${symbol} - zero quantity`);
       }
     }
 
+    const gainLoss = portfolioValue + totalDividendsYTD - totalInvested;
+
+    functions.logger.info(`📊 Portfolio summary calculated:`, {
+      totalInvested,
+      totalDividendsYTD,
+      portfolioValue,
+      gainLoss,
+      holdingsCount: holdings.length,
+    });
+
+    const portfolioSummary: PortfolioSummary = {
+      totalInvested,
+      totalDividendsYTD,
+      portfolioValue,
+      gainLoss,
+      lastUpdated: admin.firestore.Timestamp.now(),
+      currency: "CAD", // All values are now in CAD
+    };
+
+    functions.logger.info(
+      "🎉 calculateHoldingsAndPortfolioSummary completed successfully"
+    );
+    return { holdings, portfolioSummary };
+  } catch (error) {
+    functions.logger.error(
+      "❌ Error calculating holdings and portfolio summary:",
+      error
+    );
+    throw error;
+  }
+}
+
+// Calculate holdings from all historical transactions
+export async function calculateHoldings(): Promise<Holding[]> {
+  try {
+    // Use the combined function to avoid redundancy
+    const { holdings } = await calculateHoldingsAndPortfolioSummary();
     return holdings;
   } catch (error) {
     functions.logger.error("Error calculating holdings:", error);
